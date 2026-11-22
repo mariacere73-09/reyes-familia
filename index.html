@@ -89,6 +89,8 @@ nav.tabs button.on span{transform:scale(1.15)}
 .famwrap{margin-bottom:10px}
 .famwrap .fam{margin-bottom:6px}
 .nudge{background:var(--gold-l);border:2px solid var(--gold);border-radius:16px;padding:12px 14px;margin-bottom:14px;font-weight:600}
+.warn{background:#fff1d6;border:2px solid var(--gold);border-radius:14px;padding:10px 12px;margin:12px 0 8px;font-weight:600;font-size:15px}
+.gone{background:#f3e9e9;border:2px solid #e6cccc;border-radius:14px;padding:10px 12px;margin:12px 0 8px;font-weight:600;font-size:15px}
 .total{background:var(--gold-l);border-radius:14px;padding:10px 14px;margin-bottom:14px;font-weight:600}
 .group-title{font-weight:800;margin:18px 0 8px;color:var(--red)}
 
@@ -149,6 +151,12 @@ const PRI = {
 const money = n => Number(n).toLocaleString("es-ES", { style: "currency", currency: "EUR", maximumFractionDigits: 2 });
 const initial = n => (String(n).trim()[0] || "?").toUpperCase();
 const DAY = 24 * 60 * 60 * 1000;
+/* Aviso solo para quien compró el regalo: el dueño cambió el regalo después */
+function changeWarn(g) {
+  if (!g.changed || g.boughtBy !== S.me) return "";
+  return `<div class="warn">⚠️ Este regalo ha cambiado en su lista desde que lo marcaste. Revisa si lo que has comprado sigue valiendo.</div>
+    <button class="btn green small block" data-act="ackChange" data-id="${esc(g.id)}">Entendido, sigue valiendo</button><div class="spacer"></div>`;
+}
 function nudgeBtn(m) {
   const recent = Date.now() - (m.lastNudge || 0) < DAY;
   return recent
@@ -189,7 +197,7 @@ const S = {
   ready: { m: false, g: false }, error: false
 };
 const sortG = (a, b) => (a.priority - b.priority) || (a.created - b.created);
-const giftsOf = id => S.gifts.filter(g => g.ownerId === id).sort(sortG);
+const giftsOf = id => S.gifts.filter(g => g.ownerId === id && !g.deleted).sort(sortG);
 const memberName = id => S.members.find(m => m.id === id)?.name || "—";
 
 /* ---------- Datos en tiempo real ---------- */
@@ -297,7 +305,7 @@ function personHTML(me) {
   ${gs.length ? gs.map(g => {
     let st;
     if (!g.boughtBy) st = `<button class="btn buy" data-act="buy" data-id="${esc(g.id)}">🛍️ Ya lo he comprado</button>`;
-    else if (g.boughtBy === me.id) st = `<div class="bought">✅ Lo has comprado tú</div><button class="btn ghost small" data-act="unbuy" data-id="${esc(g.id)}">Desmarcar</button>`;
+    else if (g.boughtBy === me.id) st = `${changeWarn(g)}<div class="bought">✅ Lo has comprado tú</div><button class="btn ghost small" data-act="unbuy" data-id="${esc(g.id)}">Desmarcar</button>`;
     else st = `<div class="bought">✅ Ya comprado</div><button class="btn buy" disabled>Ya comprado</button>`;
     return `<div class="gift ${g.boughtBy ? "done" : ""}">${giftInfo(g)}<div class="actions" style="display:block">${st}</div></div>`;
   }).join("") : `<div class="empty"><div class="big">🤔</div><p>${esc(o.name)} todavía no ha apuntado nada.</p></div>${nudgeBtn(o)}`}`;
@@ -311,7 +319,9 @@ function buysHTML(me) {
   mine.forEach(g => (groups[g.ownerId] ||= []).push(g));
   return `<h2>Mis compras</h2><p class="hint">Los regalos que tú has marcado como comprados.</p>
   ${total > 0 ? `<div class="total">💰 Llevas gastado aprox. ${money(total)}</div>` : ""}
-  ${Object.keys(groups).map(id => `<div class="group-title">Para ${esc(memberName(id))}</div>${groups[id].sort(sortG).map(g => `<div class="gift done">${giftInfo(g)}<div class="actions"><button class="btn ghost small" data-act="unbuy" data-id="${esc(g.id)}">Desmarcar</button></div></div>`).join("")}`).join("")}`;
+  ${Object.keys(groups).map(id => `<div class="group-title">Para ${esc(memberName(id))}</div>${groups[id].sort(sortG).map(g => g.deleted
+      ? `<div class="gift done">${giftInfo(g)}<div class="gone">🗑️ Ya no está en su lista</div><div class="actions"><button class="btn ghost small" data-act="dropBuy" data-id="${esc(g.id)}">Quitar de mis compras</button></div></div>`
+      : `<div class="gift done">${giftInfo(g)}${changeWarn(g)}<div class="actions"><button class="btn ghost small" data-act="unbuy" data-id="${esc(g.id)}">Desmarcar</button></div></div>`).join("")}`).join("")}`;
 }
 
 /* ---------- Modales ---------- */
@@ -398,7 +408,15 @@ const ACT = {
   delGift: async id => {
     const g = S.gifts.find(x => x.id === id);
     if (!g || !confirm(`¿Borrar "${g.title}" de tu lista?`)) return;
-    try { const b = writeBatch(db); b.delete(doc(db, "gifts", id)); await b.commit(); toast("Regalo borrado"); }
+    try {
+      await runTransaction(db, async tx => {
+        const ref = doc(db, "gifts", id), s = await tx.get(ref);
+        if (!s.exists()) return;
+        if (s.data().boughtBy) tx.update(ref, { deleted: true });
+        else tx.delete(ref);
+      });
+      toast("Regalo borrado");
+    }
     catch { toast("No se pudo borrar. Inténtalo de nuevo."); }
   },
   buy: async id => {
@@ -410,7 +428,7 @@ const ACT = {
         const d = s.data();
         if (d.ownerId === me.id) throw new Error("own");
         if (d.boughtBy) throw new Error("taken");
-        tx.update(ref, { boughtBy: me.id, boughtByName: me.name });
+        tx.update(ref, { boughtBy: me.id, boughtByName: me.name, changed: null });
       });
       toast("¡Marcado como comprado! 🎉");
     } catch (e) {
@@ -420,8 +438,20 @@ const ACT = {
   unbuy: async id => {
     const g = S.gifts.find(x => x.id === id);
     if (!g || g.boughtBy !== S.me) return;
-    try { await updateDoc(doc(db, "gifts", id), { boughtBy: null, boughtByName: null }); toast("Desmarcado"); }
+    try { await updateDoc(doc(db, "gifts", id), { boughtBy: null, boughtByName: null, changed: null }); toast("Desmarcado"); }
     catch { toast("No se pudo guardar. Inténtalo de nuevo."); }
+  },
+  ackChange: async id => {
+    const g = S.gifts.find(x => x.id === id);
+    if (!g || g.boughtBy !== S.me) return;
+    try { await updateDoc(doc(db, "gifts", id), { changed: null }); toast("Perfecto 👍"); }
+    catch { toast("No se pudo guardar. Inténtalo de nuevo."); }
+  },
+  dropBuy: async id => {
+    const g = S.gifts.find(x => x.id === id);
+    if (!g || g.boughtBy !== S.me || !g.deleted) return;
+    try { const b = writeBatch(db); b.delete(doc(db, "gifts", id)); await b.commit(); toast("Quitado de tus compras"); }
+    catch { toast("No se pudo quitar. Inténtalo de nuevo."); }
   }
 };
 
@@ -444,7 +474,15 @@ const FORMS = {
       note: fd.get("note").trim(), priority: parseInt(fd.get("priority"), 10) || 2
     };
     try {
-      if (id) await updateDoc(doc(db, "gifts", id), data);
+      if (id) {
+        await runTransaction(db, async tx => {
+          const ref = doc(db, "gifts", id), s = await tx.get(ref);
+          if (!s.exists()) throw new Error("gone");
+          const o = s.data(), upd = { ...data };
+          if (o.boughtBy && (o.title !== data.title || (o.url || "") !== data.url || (o.note || "") !== data.note)) upd.changed = true;
+          tx.update(ref, upd);
+        });
+      }
       else {
         await addDoc(collection(db, "gifts"), { ...data, ownerId: S.me, boughtBy: null, boughtByName: null, createdAt: serverTimestamp() });
         if (meObj()?.lastNudge) await updateDoc(doc(db, "members", S.me), { lastNudge: null });
