@@ -86,6 +86,9 @@ nav.tabs button.on span{transform:scale(1.15)}
 .bar{height:8px;background:var(--line);border-radius:8px;margin-top:6px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--green);border-radius:8px}
 .back{background:none;border:0;color:var(--red);font-weight:700;padding:6px 0 12px;cursor:pointer;font-size:16px}
+.famwrap{margin-bottom:10px}
+.famwrap .fam{margin-bottom:6px}
+.nudge{background:var(--gold-l);border:2px solid var(--gold);border-radius:16px;padding:12px 14px;margin-bottom:14px;font-weight:600}
 .total{background:var(--gold-l);border-radius:14px;padding:10px 14px;margin-bottom:14px;font-weight:600}
 .group-title{font-weight:800;margin:18px 0 8px;color:var(--red)}
 
@@ -145,6 +148,13 @@ const PRI = {
 };
 const money = n => Number(n).toLocaleString("es-ES", { style: "currency", currency: "EUR", maximumFractionDigits: 2 });
 const initial = n => (String(n).trim()[0] || "?").toUpperCase();
+const DAY = 24 * 60 * 60 * 1000;
+function nudgeBtn(m) {
+  const recent = Date.now() - (m.lastNudge || 0) < DAY;
+  return recent
+    ? `<button class="btn ghost small block" disabled>👋 Hoy ya le han dado un toque</button>`
+    : `<button class="btn ghost small block" data-act="nudge" data-id="${esc(m.id)}">👋 Dar un toque (anónimo)</button>`;
+}
 function safeUrl(u) {
   u = (u || "").trim();
   if (!u) return "";
@@ -260,6 +270,7 @@ function mineHTML(me) {
   const gs = giftsOf(me.id);
   return `<h2>Mi lista de Reyes</h2>
   <p class="hint">Solo tú ves esta lista tal cual. Nadie te dirá qué se ha comprado 🤫</p>
+  ${gs.length === 0 && me.lastNudge ? `<div class="nudge">👋 Alguien de la familia te recuerda que aún no has apuntado ningún regalo. ¡Los Reyes esperan! 🎁</div>` : ""}
   <button class="btn primary block" data-act="addGift">＋ Añadir regalo</button><div class="spacer"></div>
   ${gs.length ? gs.map(g => `<div class="gift">${giftInfo(g)}
       <div class="actions"><button class="btn ghost small" data-act="editGift" data-id="${esc(g.id)}">✏️ Editar</button><button class="btn ghost small" data-act="delGift" data-id="${esc(g.id)}">🗑️ Borrar</button></div></div>`).join("")
@@ -273,8 +284,8 @@ function familyHTML(me) {
   return `<h2>Familia</h2><p class="hint">Toca a una persona para ver su lista y marcar lo que ya has comprado.</p>
   ${others.map(m => {
     const n = giftsOf(m.id).length;
-    return `<button class="fam" data-act="open" data-id="${esc(m.id)}"><span class="av">${esc(initial(m.name))}</span>
-      <span class="grow"><b>${esc(m.name)}</b><div class="sum">${n ? `${n} ${n === 1 ? "regalo" : "regalos"}` : "Aún sin regalos"}</div></span><span>›</span></button>`;
+    return `<div class="famwrap"><button class="fam" data-act="open" data-id="${esc(m.id)}"><span class="av">${esc(initial(m.name))}</span>
+      <span class="grow"><b>${esc(m.name)}</b><div class="sum">${n ? `${n} ${n === 1 ? "regalo" : "regalos"}` : "Aún sin regalos"}</div></span><span>›</span></button>${n === 0 ? nudgeBtn(m) : ""}</div>`;
   }).join("")}`;
 }
 
@@ -289,7 +300,7 @@ function personHTML(me) {
     else if (g.boughtBy === me.id) st = `<div class="bought">✅ Lo has comprado tú</div><button class="btn ghost small" data-act="unbuy" data-id="${esc(g.id)}">Desmarcar</button>`;
     else st = `<div class="bought">✅ Ya comprado</div><button class="btn buy" disabled>Ya comprado</button>`;
     return `<div class="gift ${g.boughtBy ? "done" : ""}">${giftInfo(g)}<div class="actions" style="display:block">${st}</div></div>`;
-  }).join("") : `<div class="empty"><div class="big">🤔</div><p>${esc(o.name)} todavía no ha apuntado nada.</p></div>`}`;
+  }).join("") : `<div class="empty"><div class="big">🤔</div><p>${esc(o.name)} todavía no ha apuntado nada.</p></div>${nudgeBtn(o)}`}`;
 }
 
 function buysHTML(me) {
@@ -367,6 +378,21 @@ const ACT = {
   tab: (_, el) => { S.tab = el.dataset.tab; S.viewing = null; render(); window.scrollTo(0, 0); },
   open: id => { S.viewing = id; render(); window.scrollTo(0, 0); },
   back: () => { S.viewing = null; render(); },
+  nudge: async id => {
+    const me = meObj(); if (!me || id === me.id) return;
+    if (giftsOf(id).length > 0) return toast("Esa persona ya ha apuntado regalos 🎉");
+    try {
+      await runTransaction(db, async tx => {
+        const ref = doc(db, "members", id), s = await tx.get(ref);
+        if (!s.exists()) throw new Error("gone");
+        if (Date.now() - (s.data().lastNudge || 0) < DAY) throw new Error("recent");
+        tx.update(ref, { lastNudge: Date.now() });
+      });
+      toast("¡Toque enviado! 👋 Nadie sabrá que has sido tú");
+    } catch (e) {
+      toast(e.message === "recent" ? "Hoy ya le han dado un toque 😉" : "No se pudo enviar. Inténtalo de nuevo.");
+    }
+  },
   addGift: () => giftModal(null),
   editGift: id => giftModal(id),
   delGift: async id => {
@@ -419,7 +445,10 @@ const FORMS = {
     };
     try {
       if (id) await updateDoc(doc(db, "gifts", id), data);
-      else await addDoc(collection(db, "gifts"), { ...data, ownerId: S.me, boughtBy: null, boughtByName: null, createdAt: serverTimestamp() });
+      else {
+        await addDoc(collection(db, "gifts"), { ...data, ownerId: S.me, boughtBy: null, boughtByName: null, createdAt: serverTimestamp() });
+        if (meObj()?.lastNudge) await updateDoc(doc(db, "members", S.me), { lastNudge: null });
+      }
       closeModal(); toast(id ? "Regalo actualizado ✨" : "¡Regalo añadido! 🎁");
     } catch { toast("No se pudo guardar. Inténtalo de nuevo."); }
   },
